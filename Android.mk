@@ -8,7 +8,6 @@
 #      http://www.gnu.org/licenses/gpl.html
 #
 
-LOCAL_PATH := $(my-dir)
+LOCAL_PATH := $(my-dir)/openrazer
 LOCAL_MODULE := $(notdir $(LOCAL_PATH))
-EXTRA_KERNEL_MODULE_PATH_$(LOCAL_MODULE) := $(LOCAL_PATH)
-
+EXTRA_KERNEL_MODULE_PATH_openrazer := $(LOCAL_PATH)
