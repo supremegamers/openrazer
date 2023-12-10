@@ -3,6 +3,7 @@
 """
 Hardware base class
 """
+import configparser
 import re
 import os
 import types
@@ -15,6 +16,7 @@ import random
 from openrazer_daemon.dbus_services.service import DBusService
 import openrazer_daemon.dbus_services.dbus_methods
 from openrazer_daemon.misc import effect_sync
+from openrazer_daemon.misc.battery_notifier import BatteryManager as _BatteryManager
 
 
 # pylint: disable=too-many-instance-attributes
@@ -37,6 +39,7 @@ class RazerDevice(DBusService):
     DEDICATED_MACRO_KEYS = False
     MATRIX_DIMS = None
     POLL_RATES = None
+    DPI_MAX = None
 
     WAVE_DIRS = (1, 2)
 
@@ -62,6 +65,7 @@ class RazerDevice(DBusService):
         self.additional_interfaces = []
         if additional_interfaces is not None:
             self.additional_interfaces.extend(additional_interfaces)
+        self._battery_manager = None
 
         self.config = config
         self.persistence = persistence
@@ -231,7 +235,10 @@ class RazerDevice(DBusService):
                 self.add_dbus_method(m[0], m[1], m[2], in_signature=m[3], out_signature=m[4])
 
         for i in self.ZONES:
-            if 'set_' + i + '_static' in self.METHODS or 'set_' + i + '_static_naga_hex_v2' in self.METHODS or 'set_' + i + '_active' in self.METHODS:
+            if 'set_' + i + '_static_classic' in self.METHODS \
+                    or 'set_' + i + '_static' in self.METHODS \
+                    or 'set_' + i + '_active' in self.METHODS \
+                    or 'set_' + i + '_on' in self.METHODS:
                 self.zone[i]["present"] = True
                 for m in effect_methods[i]:
                     self.logger.debug("Adding {}.{} method to DBus".format(m[0], m[1]))
@@ -246,14 +253,14 @@ class RazerDevice(DBusService):
                 try:
                     self.dpi[0] = int(self.persistence[self.storage_name]['dpi_x'])
                     self.dpi[1] = int(self.persistence[self.storage_name]['dpi_y'])
-                except KeyError:
-                    pass
+                except (KeyError, configparser.NoOptionError):
+                    self.logger.info("Failed to get DPI from persistence storage, using default.")
 
             if 'set_poll_rate' in self.METHODS:
                 try:
                     self.poll_rate = int(self.persistence[self.storage_name]['poll_rate'])
-                except KeyError:
-                    pass
+                except (KeyError, configparser.NoOptionError):
+                    self.logger.info("Failed to get poll rate from persistence storage, using default.")
 
         # load last effects
         for i in self.ZONES:
@@ -263,20 +270,20 @@ class RazerDevice(DBusService):
                     # try reading the effect name from the persistence
                     try:
                         self.zone[i]["effect"] = self.persistence[self.storage_name][i + '_effect']
-                    except KeyError:
-                        pass
+                    except (KeyError, configparser.NoOptionError):
+                        self.logger.info("Failed to get " + i + " effect from persistence storage, using default.")
 
                     # zone active status
                     try:
                         self.zone[i]["active"] = self.persistence.getboolean(self.storage_name, i + '_active')
-                    except KeyError:
-                        pass
+                    except (KeyError, configparser.NoOptionError):
+                        self.logger.info("Failed to get " + i + " active from persistence storage, using default.")
 
                     # brightness
                     try:
                         self.zone[i]["brightness"] = float(self.persistence[self.storage_name][i + '_brightness'])
-                    except KeyError:
-                        pass
+                    except (KeyError, configparser.NoOptionError):
+                        self.logger.info("Failed to get " + i + " brightness from persistence storage, using default.")
 
                     # colors.
                     # these are stored as a string that must contain 9 numbers, separated with spaces.
@@ -290,29 +297,28 @@ class RazerDevice(DBusService):
                         # check if we have exactly 9 colors
                         if len(self.zone[i]["colors"]) != 9:
                             raise ValueError('There must be exactly 9 colors')
-
                     except ValueError:
                         # invalid colors. reinitialize
                         self.zone[i]["colors"] = [0, 255, 0, 0, 255, 255, 0, 0, 255]
                         self.logger.info("%s: Invalid colors; restoring to defaults.", self.__class__.__name__)
-                        pass
-
-                    except KeyError:
-                        pass
+                    except (KeyError, configparser.NoOptionError):
+                        self.logger.info("Failed to get " + i + " colors from persistence storage, using default.")
 
                     # speed
                     try:
                         self.zone[i]["speed"] = int(self.persistence[self.storage_name][i + '_speed'])
-
-                    except KeyError:
-                        pass
+                    except (KeyError, configparser.NoOptionError):
+                        self.logger.info("Failed to get " + i + " speed from persistence storage, using default.")
 
                     # wave direction
                     try:
                         self.zone[i]["wave_dir"] = int(self.persistence[self.storage_name][i + '_wave_dir'])
+                    except (KeyError, configparser.NoOptionError):
+                        self.logger.info("Failed to get " + i + " wave direction from persistence storage, using default.")
 
-                    except KeyError:
-                        pass
+        # Initialize battery manager if the device has support
+        if 'get_battery' in self.METHODS:
+            self._init_battery_manager()
 
         self.restore_dpi_poll_rate()
         self.restore_brightness()
@@ -350,10 +356,23 @@ class RazerDevice(DBusService):
         """
         dpi_func = getattr(self, "setDPI", None)
         if dpi_func is not None:
+            # Constrain value in case the max has changed, e.g. wired/wireless might different maximums
+            if self.dpi[0] > self.DPI_MAX:
+                self.logger.warning("Constraining DPI X to maximum of " + str(self.DPI_MAX) + " because stored value " + str(self.dpi[0]) + " is larger.")
+                self.dpi[0] = self.DPI_MAX
+            if self.dpi[1] > self.DPI_MAX:
+                self.logger.warning("Constraining DPI Y to maximum of " + str(self.DPI_MAX) + " because stored value " + str(self.dpi[1]) + " is larger.")
+                self.dpi[1] = self.DPI_MAX
+
             dpi_func(self.dpi[0], self.dpi[1])
 
         poll_rate_func = getattr(self, "setPollRate", None)
         if poll_rate_func is not None:
+            # Constrain value in case the available values have changed, e.g. wired/wireless might different values available
+            if self.poll_rate not in self.POLL_RATES:
+                self.logger.warning("Constraining poll rate because stored value " + str(self.poll_rate) + " is not available.")
+                self.poll_rate = min(self.POLL_RATES, key=lambda x: abs(x - self.poll_rate))
+
             poll_rate_func(self.poll_rate)
 
     def restore_brightness(self):
@@ -447,6 +466,8 @@ class RazerDevice(DBusService):
                         if effect == 'starlightRandom':
                             effect_func(speed)
                         elif effect == 'wave':
+                            effect_func(wave_dir)
+                        elif effect == 'wheel':
                             effect_func(wave_dir)
                         elif effect == 'rippleRandomColour':
                             # do nothing. this is handled in the ripple manager.
@@ -1002,6 +1023,48 @@ class RazerDevice(DBusService):
 
             mode_file.write(bytes([mode_id, param]))
 
+    def _set_custom_effect(self):
+        """
+        Set the device to use custom LED matrix
+        """
+        # self.logger.debug("DBus call _set_custom_effect")
+
+        driver_path = self.get_driver_path('matrix_effect_custom')
+
+        payload = b'1'
+
+        with open(driver_path, 'wb') as driver_file:
+            driver_file.write(payload)
+
+    def _set_key_row(self, payload):
+        """
+        Set the RGB matrix on the device
+
+        Byte array like
+        [1, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00,
+            255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 255, 00, 255, 00, 00]
+
+        First byte is row, on firefly its always 1, on keyboard its 0-5
+        Then its 3byte groups of RGB
+        :param payload: Binary payload
+        :type payload: bytes
+        """
+        # self.logger.debug("DBus call set_key_row")
+
+        driver_path = self.get_driver_path('matrix_custom_frame')
+
+        with open(driver_path, 'wb') as driver_file:
+            driver_file.write(payload)
+
+    def _init_battery_manager(self):
+        """
+        Initializes the BatteryManager using the provided name
+        """
+        self._battery_manager = _BatteryManager(self, self._device_number, self.getDeviceName())  # pylint: disable=no-member
+        self._battery_manager.active = self.config.getboolean('Startup', 'battery_notifier', fallback=False)
+        self._battery_manager.frequency = self.config.getint('Startup', 'battery_notifier_freq', fallback=10 * 60)
+        self._battery_manager.percent = self.config.getint('Startup', 'battery_notifier_percent', fallback=33)
+
     def get_vid_pid(self):
         """
         Get the usb VID PID
@@ -1089,6 +1152,9 @@ class RazerDevice(DBusService):
         """
         # Clear observer list
         self._observer_list.clear()
+
+        if self._battery_manager:
+            self._battery_manager.close()
 
     def close(self):
         """

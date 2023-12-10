@@ -117,9 +117,10 @@ def test_sysfs_consistency(d):
     check_sysfs("lighting_spectrum", "matrix_effect_spectrum")
     check_any_sysfs(["lighting_starlight_random", "lighting_starlight_single", "lighting_starlight_dual"], ["matrix_effect_starlight"])
     # Ignore devices that have mono-color razer.device.lighting.bw2013.setStatic()
-    if d._pid not in [0x010d, 0x010e, 0x0113, 0x011a, 0x011b, 0x011c, 0x0202]:
+    if d._pid not in [0x010d, 0x010e, 0x0113, 0x0118, 0x011a, 0x011b, 0x011c, 0x0202]:
         check_sysfs("lighting_static", "matrix_effect_static")
     check_sysfs("lighting_wave", "matrix_effect_wave")
+    check_sysfs("lighting_wheel", "matrix_effect_wheel")
     check_sysfs("lighting_pulsate", "matrix_effect_pulsate")
     check_sysfs("lighting_blinking", "matrix_effect_blinking")
 
@@ -133,7 +134,7 @@ def test_sysfs_consistency(d):
             # There are two implementations with different sysfs files
             check_any_sysfs([f"lighting_{prefix}_{effect}"], [f"{prefix}_matrix_effect_{effect}", f"{prefix}_led_effect"])
 
-        check_sysfs(f"lighting_{prefix}_breath_single", f"{prefix}_matrix_effect_breath")
+        check_any_sysfs([f"lighting_{prefix}_breath_single", f"lighting_{prefix}_breath_mono"], [f"{prefix}_matrix_effect_breath"])
 
 
 def test_ripple_capable(d):
